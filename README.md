@@ -78,7 +78,7 @@ oc create namespace aic-operator-system
 ```
 
 The `sourceImage`, `devicePluginImage`, and `deviceAgentImage` are hosted on the public
-`ghcr.io/quic` registry and do not require credentials.
+`ghcr.io/qualcomm` registry and do not require credentials.
 
 KMM builds a kernel-specific driver image inside the cluster and pushes it to the
 repository specified by `spec.driversImage`. The registry credentials must have
@@ -161,8 +161,8 @@ For full KMM configuration options see the
 oc apply -k https://github.com/qualcomm/aic-operator/config/default
 
 # Pin to a specific release — the kustomization.yaml at that tag already has the
-# correct image version, so no substitution is needed
-oc apply -k https://github.com/qualcomm/aic-operator/config/default?ref=v0.3.0
+# correct image version, so no substitution is needed or # latest available.
+oc apply -k https://github.com/qualcomm/aic-operator/config/default?ref=v0.5.0
 ```
 
 > The image tag is managed in `config/manager/kustomization.yaml` in the repository.
@@ -204,12 +204,12 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
     app.kubernetes.io/created-by: aic-operator
 spec:
-  sourceImage: "ghcr.io/quic/cloud_ai_qaic_kmd_src"
+  sourceImage: "ghcr.io/qualcomm/cloud_ai_qaic_kmd_src"
   driversImage: "<your-registry-server>/<username>/cloud_ai_qaic_kmd_ko:0.4.0_1.22.8.1_${KERNEL_VERSION}"
   driversVersion: "0.4.0_1.22.8.1" # or latest available
-  devicePluginImage: "ghcr.io/quic/cloud_ai_k8s_device_plugin"
+  devicePluginImage: "ghcr.io/qualcomm/cloud_ai_k8s_device_plugin"
   devPluginVersion: "1.22.8.1"     # or latest available
-  deviceAgentImage: "ghcr.io/quic/cloud_ai_qaic_deviceagent"
+  deviceAgentImage: "ghcr.io/qualcomm/cloud_ai_qaic_deviceagent"
   deviceAgentVersion: "0.4.0_1.22.8.1" # or latest available
   imageRepoSecret:
     name: <pull-secret-name>   # name of the secret created in step 3
@@ -247,7 +247,7 @@ spec:
   priority: 0
   containers:
     - name: qaic-inf
-      image: ghcr.io/quic/cloud_ai_inference_ubuntu24:1.20.6.0
+      image: ghcr.io/qualcomm/cloud_ai_inference_ubuntu24:1.22.8.1 # or latest available
       imagePullPolicy: IfNotPresent
       command: ["/bin/bash", "-ce", "tail -f /dev/null"]
       resources:

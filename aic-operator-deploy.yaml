@@ -564,7 +564,7 @@ spec:
         - --leader-elect
         command:
         - /manager
-        image: ghcr.io/quic/cloud_ai_openshift_operator:latest ##Replace the image tag to use a different version of Operator
+        image: ghcr.io/qualcomm/cloud_ai_openshift_operator:latest ##Replace the image tag to use a different version of Operator
         imagePullPolicy: Always
         livenessProbe:
           httpGet:

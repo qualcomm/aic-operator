@@ -6,7 +6,7 @@ metadata:
     capabilities: Basic Install
     categories: AI/Machine Learning, OpenShift Optional
     certified: "false"
-    containerImage: ghcr.io/quic/cloud_ai_openshift_operator@sha256:e0b58ba86208a185fd0978077d8e807e747393017e1bef57b72200e47bdd6888
+    containerImage: ghcr.io/qualcomm/cloud_ai_openshift_operator@sha256:d8690d8b78fcc5b1e7c96c7d16c7c30711bf28895532384a63cfa03798b297f2
     description: Automate the management of OpenShift Operator for Qualcomm AI 100
       accelerators.
     features.operators.openshift.io/cnf: "false"
@@ -69,8 +69,8 @@ spec:
     name: Qualcomm Technologies, Inc.
     url: https://github.com/qualcomm/aic-operator
   relatedImages:
-  - image: ghcr.io/quic/cloud_ai_openshift_operator@sha256:e0b58ba86208a185fd0978077d8e807e747393017e1bef57b72200e47bdd6888
-    name: cloud_ai_openshift_operator-e0b58ba86208a185fd0978077d8e807e747393017e1bef57b72200e47bdd6888
+  - image: ghcr.io/qualcomm/cloud_ai_openshift_operator@sha256:d8690d8b78fcc5b1e7c96c7d16c7c30711bf28895532384a63cfa03798b297f2
+    name: cloud_ai_openshift_operator-d8690d8b78fcc5b1e7c96c7d16c7c30711bf28895532384a63cfa03798b297f2
   - image: registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:b55f908e38695496011dbe334431cbdf5488c215f6850af3dffa528707c70a56
     name: ose-kube-rbac-proxy-b55f908e38695496011dbe334431cbdf5488c215f6850af3dffa528707c70a56
   version: 0.0.0

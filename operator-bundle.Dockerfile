@@ -25,12 +25,12 @@ LABEL operators.operatorframework.io.test.config.v1=tests/scorecard/
 
 # Labels for certified-operators
 LABEL operatorframework.io/suggested-namespace=aic-operator-system
-LABEL com.redhat.openshift.versions="v4.14-v4.20"
+LABEL com.redhat.openshift.versions="v4.18-v4.22"
 
 # Copy files to locations specified by labels.
 COPY bundle/manifests /manifests/
 COPY bundle/metadata /metadata/
 COPY bundle/tests/scorecard /tests/scorecard/
 # Include license and location information
-LABEL org.opencontainers.image.source https://github.com/quic/cloud-ai-containers
+LABEL org.opencontainers.image.source=https://github.com/qualcomm/cloud-ai-containers
 COPY operands/kmd_src_img_build/CONTAINER_LICENSE.txt /licenses/
