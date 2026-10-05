@@ -21,9 +21,9 @@ and setting up the associated Device Plugin.
 
 ## Prerequisites
 
-- OpenShift v4.18+
-- Kernel Module Management (KMM) Operator v2.0+ by Red Hat
-- Node Feature Discovery (NFD) Operator v4.16+ by Red Hat
+- OpenShift v4.20+
+- Kernel Module Management (KMM) Operator v2.7 by Red Hat
+- Node Feature Discovery (NFD) Operator v4.22 by Red Hat
 - A Qualcomm AI 100 Ultra accelerator attached to the host node
 - `oc` CLI configured and logged in with cluster-admin privileges
 - Access to a container registry reachable from the cluster
@@ -292,7 +292,7 @@ Then uninstall the operator through the OpenShift web console:
 
 ### Requirements
 
-- Go v1.23.0+
+- Go v1.26.7
 - Docker v17.03+
 
 ### Build and Push the Operator Image

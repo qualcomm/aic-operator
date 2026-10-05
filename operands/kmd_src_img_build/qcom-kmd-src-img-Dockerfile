@@ -43,7 +43,7 @@ COPY --chmod=755 motd.sh /etc
 COPY CONTAINER_LICENSE.txt /usr/share/doc
 RUN ln -s /usr/share/doc/CONTAINER_LICENSE.txt / && \
     ln -s /usr/share/doc/CONTAINER_LICENSE.txt /root && \
-    ln -s /usr/share/doc/CONTAINER_LICENSE.txt /licenses && \
+    cp /usr/share/doc/CONTAINER_LICENSE.txt /licenses && \
 # Different systems use different system wide non-login shell config files
     if [ -e /etc/bash.bashrc ]; then \
         echo '[ ! -z "$TERM" -a -r /etc/motd.sh ] && /etc/motd.sh' >> /etc/bash.bashrc ; \

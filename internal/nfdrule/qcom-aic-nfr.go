@@ -56,7 +56,7 @@ func parseNFR_Manifest(ctx context.Context, nfrObj *nfr.NodeFeatureRule, aic *ai
 	raw_manifest, err := os.ReadFile(qcom_aic_nfrmanifest)
 	logger := log.FromContext(ctx)
 	if err != nil {
-		return fmt.Errorf("Error encountered while reading NFR manifest %s : %v", qcom_aic_nfrmanifest, err)
+		return fmt.Errorf("error reading NFR manifest %s: %w", qcom_aic_nfrmanifest, err)
 	}
 	s := json.NewYAMLSerializer(json.DefaultMetaFactory, scheme.Scheme, scheme.Scheme)
 	regex, _ := regexp.Compile(`\b(\w*kind:\w*)\B.*\b`)
@@ -64,8 +64,8 @@ func parseNFR_Manifest(ctx context.Context, nfrObj *nfr.NodeFeatureRule, aic *ai
 	logger.Info("Resource identified kind", "kind", kind)
 	_, _, err = s.Decode(raw_manifest, nil, nfrObj)
 	if err != nil {
-		return fmt.Errorf("Error encountered while decoding %s resource in manifest %s: %v", "NodeFeatureRule", qcom_aic_nfrmanifest, err)
+		return fmt.Errorf("error decoding NodeFeatureRule resource in manifest %s: %w", qcom_aic_nfrmanifest, err)
 	}
-	nfrObj.ObjectMeta.Namespace = aic.Namespace
+	nfrObj.Namespace = aic.Namespace
 	return nil
 }

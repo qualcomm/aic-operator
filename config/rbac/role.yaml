@@ -5,16 +5,23 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
   - aic.qualcomm.com
   resources:
   - aics
   verbs:
-  - create
-  - delete
   - get
   - list
   - patch
-  - update
   - watch
 - apiGroups:
   - aic.qualcomm.com
@@ -23,13 +30,16 @@ rules:
   verbs:
   - update
 - apiGroups:
-  - aic.qualcomm.com
+  - apps
   resources:
-  - aics/status
+  - daemonsets
   verbs:
+  - create
+  - delete
   - get
+  - list
   - patch
-  - update
+  - watch
 - apiGroups:
   - kmm.sigs.x-k8s.io
   resources:
@@ -40,13 +50,15 @@ rules:
   - get
   - list
   - patch
-  - update
   - watch
 - apiGroups:
-  - kmm.sigs.x-k8s.io
+  - nfd.openshift.io
   resources:
-  - modules/status
+  - nodefeaturerules
   verbs:
+  - create
+  - delete
   - get
+  - list
   - patch
-  - update
+  - watch

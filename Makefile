@@ -24,12 +24,15 @@ BUNDLE_DEFAULT_CHANNEL := --default-channel=$(DEFAULT_CHANNEL)
 endif
 BUNDLE_METADATA_OPTS ?= $(BUNDLE_CHANNELS) $(BUNDLE_DEFAULT_CHANNEL)
 
-# IMAGE_TAG_BASE defines the docker.io namespace and part of the image name for remote images.
-# This variable is used to construct full image tags for bundle and catalog images.
+# IMAGE_REGISTRY and IMAGE_TAG_BASE define the registry namespace and image name.
+# The local registry default prevents accidental publication. Set IMAGE_REGISTRY explicitly
+# when building images that will be pushed to a remote registry.
 #
-# For example, running 'make bundle-build bundle-push catalog-build catalog-push' will build and push both
-# qualcomm.com/cloud_ai_openshift_operator-bundle:$VERSION and qualcomm.com/cloud_ai_openshift_operator-catalog:$VERSION.
-IMAGE_TAG_BASE ?= qualcomm.com/cloud_ai_openshift_operator
+# For example, running 'make bundle-build bundle-push catalog-build catalog-push IMAGE_REGISTRY=registry.example.com/project'
+# will build and push both registry.example.com/project/cloud_ai_openshift_operator-bundle:$VERSION
+# and registry.example.com/project/cloud_ai_openshift_operator-catalog:$VERSION.
+IMAGE_REGISTRY ?= localhost
+IMAGE_TAG_BASE ?= $(IMAGE_REGISTRY)/cloud_ai_openshift_operator
 
 # BUNDLE_IMG defines the image:tag used for the bundle.
 # You can use it as an arg. (E.g make bundle-build BUNDLE_IMG=<some-registry>/<project-name-bundle>:<tag>)
@@ -46,14 +49,26 @@ ifeq ($(USE_IMAGE_DIGESTS), true)
 	BUNDLE_GEN_FLAGS += --use-image-digests
 endif
 
-# Set the Operator SDK version to use. By default, what is installed on the system is used.
-# This is useful for CI or a project to utilize a specific version of the operator-sdk toolkit.
-OPERATOR_SDK_VERSION ?= v1.39.1
+## Pinned build tool versions
+KUSTOMIZE_VERSION ?= v5.8.2
+CONTROLLER_TOOLS_VERSION ?= v0.20.1
+OPERATOR_SDK_VERSION ?= v1.42.3
+GOLANGCI_LINT_VERSION ?= v2.14.0
+ENVTEST_VERSION ?= v0.0.0-20260305142021-f9589b9f2b9d
+OPM_VERSION ?= v1.74.0
+OPENSHIFT_PREFLIGHT_VERSION ?= 1.21.2
+GOLANGCI_LINT_VERSION_NUMBER := $(patsubst v%,%,$(GOLANGCI_LINT_VERSION))
 
-# Image URL to use all building/pushing image targets
+# Kubernetes version used by the envtest control-plane assets.
+ENVTEST_K8S_VERSION ?= 1.35.0
+
+# USE_SYSTEM_TOOLS prefers the pinned build tools from PATH when their versions
+# match. Missing or mismatched tools fall back to pinned copies in LOCALBIN,
+# except golangci-lint, which must be provided by the development environment.
+USE_SYSTEM_TOOLS ?= true
+
+# Image URL used by image build, deployment, and bundle generation targets.
 IMG ?= ${IMAGE_TAG_BASE}:${VERSION}
-# ENVTEST_K8S_VERSION refers to the version of kubebuilder assets to be downloaded by envtest binary.
-ENVTEST_K8S_VERSION = 1.31.0
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
 ifeq (,$(shell go env GOBIN))
@@ -113,20 +128,95 @@ vet: ## Run go vet against code.
 
 .PHONY: test
 test: manifests generate fmt vet envtest ## Run tests.
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
+	KUBEBUILDER_ASSETS="$${KUBEBUILDER_ASSETS:-$$($(ENVTEST) use $(ENVTEST_K8S_VERSION) --bin-dir $(LOCALBIN) -p path)}" go test $$(go list ./... | grep -v /e2e) -coverprofile cover.out
 
-# Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
-.PHONY: test-e2e  # Run the e2e tests against a Kind k8s instance that is spun up.
-test-e2e:
-	go test ./test/e2e/ -v -ginkgo.v
-	
-GOLANGCI_LINT = $(shell pwd)/bin/golangci-lint
-GOLANGCI_LINT_VERSION ?= v1.54.2
-golangci-lint:
-	@[ -f $(GOLANGCI_LINT) ] || { \
-	set -e ;\
-	curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/master/install.sh | sh -s -- -b $(shell dirname $(GOLANGCI_LINT)) $(GOLANGCI_LINT_VERSION) ;\
-	}
+.PHONY: clean
+clean: ## Remove generated local tools, SBOM/Preflight artifacts, and test output.
+	rm -rf "$(LOCALBIN)" "$(SBOM_ARTIFACTS_DIR)" "$(PREFLIGHT_ARTIFACTS)" cover.out default.etcd
+	find "$(CURDIR)" -maxdepth 1 -mindepth 1 -type d -name 'bundle_tmp[0-9]*' -exec rm -rf {} +
+
+.PHONY: pkg-sbom
+pkg-sbom: ## Build the manager and write its Syft package PURLs under sbom-artifacts/pkg-scan.
+	@command -v "$(SYFT)" >/dev/null 2>&1 || { echo "Error: Syft is required on PATH; install it in the development environment."; exit 1; }
+	mkdir -p "$(PKG_SCAN_DIR)"
+	go build -o "$(PKG_SCAN_BINARY)" cmd/main.go
+	$(SYFT) scan "file:$(PKG_SCAN_BINARY)" -o syft-json | (cd tools && go run ./cmd/extract-syft-purls) > "$(PKG_SCAN_PURL_LIST)"
+
+.PHONY: pkg-compare
+pkg-compare: pkg-sbom
+	@test -n "$(APPROVED_PKG_LIST)" && test -r "$(APPROVED_PKG_LIST)" || { echo "Error: set APPROVED_PKG_LIST to a readable internal approval list."; exit 1; }
+	sed -E -e 's/[[:space:]]+#.*$$//' -e 's/^[[:space:]]+//' -e 's/[[:space:]]+$$//' "$(APPROVED_PKG_LIST)" | sed '/^$$/d' | sort -u > "$(PKG_SCAN_APPROVED_LIST)"
+	comm -23 "$(PKG_SCAN_PURL_LIST)" "$(PKG_SCAN_APPROVED_LIST)" > "$(PKG_SCAN_UNAPPROVED_LIST)"
+
+.PHONY: pkg-report
+pkg-report: pkg-compare ## Print packages in the manager binary that are not approved.
+	@if test -s "$(PKG_SCAN_UNAPPROVED_LIST)"; then \
+		echo "Unapproved packages:"; \
+		cat "$(PKG_SCAN_UNAPPROVED_LIST)"; \
+	else \
+		echo "All manager-binary packages are approved."; \
+	fi
+
+.PHONY: pkg-check
+pkg-check: pkg-compare ## Fail when the manager binary contains an unapproved package.
+	@if test -s "$(PKG_SCAN_UNAPPROVED_LIST)"; then \
+		echo "Unapproved packages:"; \
+		cat "$(PKG_SCAN_UNAPPROVED_LIST)"; \
+		exit 1; \
+	fi
+	@echo "All manager-binary packages are approved."
+
+.PHONY: image-pkg-sbom
+image-pkg-sbom: docker-build bundle-build ## Build the manager and bundle images and write their non-Go PURLs under sbom-artifacts.
+	@command -v "$(SYFT)" >/dev/null 2>&1 || { echo "Error: Syft is required on PATH; install it in the development environment."; exit 1; }
+	mkdir -p "$(IMAGE_PKG_SCAN_DIR)"
+	mkdir -p "$(BUNDLE_IMAGE_PKG_SCAN_DIR)"
+	$(SYFT) scan "docker:$(IMG)" -o syft-json | (cd tools && go run ./cmd/extract-syft-purls) > "$(IMAGE_PKG_SCAN_ALL_PURL_LIST)"
+	awk '!/^pkg:golang\//' "$(IMAGE_PKG_SCAN_ALL_PURL_LIST)" | sed -E 's/[@?].*$$//' | sort -u > "$(IMAGE_PKG_SCAN_PURL_LIST)"
+	$(SYFT) scan "docker:$(BUNDLE_IMG)" -o syft-json | (cd tools && go run ./cmd/extract-syft-purls) > "$(BUNDLE_IMAGE_PKG_SCAN_ALL_PURL_LIST)"
+	awk '!/^pkg:golang\//' "$(BUNDLE_IMAGE_PKG_SCAN_ALL_PURL_LIST)" | sed -E 's/[@?].*$$//' | sort -u > "$(BUNDLE_IMAGE_PKG_SCAN_PURL_LIST)"
+
+.PHONY: image-pkg-compare
+image-pkg-compare: image-pkg-sbom
+	@test -n "$(APPROVED_BASEOS_PKG_LIST)" && test -r "$(APPROVED_BASEOS_PKG_LIST)" || { echo "Error: set APPROVED_BASEOS_PKG_LIST to a readable internal approval list."; exit 1; }
+	sed -E -e 's/[[:space:]]+#.*$$//' -e 's/^[[:space:]]+//' -e 's/[[:space:]]+$$//' "$(APPROVED_BASEOS_PKG_LIST)" | sed '/^$$/d' | sort -u > "$(IMAGE_PKG_SCAN_APPROVED_LIST)"
+	cp "$(IMAGE_PKG_SCAN_APPROVED_LIST)" "$(BUNDLE_IMAGE_PKG_SCAN_APPROVED_LIST)"
+	comm -23 "$(IMAGE_PKG_SCAN_PURL_LIST)" "$(IMAGE_PKG_SCAN_APPROVED_LIST)" > "$(IMAGE_PKG_SCAN_UNAPPROVED_LIST)"
+	comm -23 "$(BUNDLE_IMAGE_PKG_SCAN_PURL_LIST)" "$(BUNDLE_IMAGE_PKG_SCAN_APPROVED_LIST)" > "$(BUNDLE_IMAGE_PKG_SCAN_UNAPPROVED_LIST)"
+
+.PHONY: image-pkg-report
+image-pkg-report: image-pkg-compare ## Print unapproved non-Go packages in the manager and bundle images.
+	@if test -s "$(IMAGE_PKG_SCAN_UNAPPROVED_LIST)"; then \
+		echo "Unapproved manager-image packages:"; \
+		cat "$(IMAGE_PKG_SCAN_UNAPPROVED_LIST)"; \
+	else \
+		echo "All non-Go manager-image packages are approved."; \
+	fi
+	@if test -s "$(BUNDLE_IMAGE_PKG_SCAN_UNAPPROVED_LIST)"; then \
+		echo "Unapproved bundle-image packages:"; \
+		cat "$(BUNDLE_IMAGE_PKG_SCAN_UNAPPROVED_LIST)"; \
+	else \
+		echo "All non-Go bundle-image packages are approved."; \
+	fi
+
+.PHONY: image-pkg-check
+image-pkg-check: image-pkg-compare ## Fail when the manager or bundle image contains an unapproved non-Go package.
+	@status=0; \
+	if test -s "$(IMAGE_PKG_SCAN_UNAPPROVED_LIST)"; then \
+		echo "Unapproved manager-image packages:"; \
+		cat "$(IMAGE_PKG_SCAN_UNAPPROVED_LIST)"; \
+		status=1; \
+	else \
+		echo "All non-Go manager-image packages are approved."; \
+	fi; \
+	if test -s "$(BUNDLE_IMAGE_PKG_SCAN_UNAPPROVED_LIST)"; then \
+		echo "Unapproved bundle-image packages:"; \
+		cat "$(BUNDLE_IMAGE_PKG_SCAN_UNAPPROVED_LIST)"; \
+		status=1; \
+	else \
+		echo "All non-Go bundle-image packages are approved."; \
+	fi; \
+	exit "$$status"
 
 .PHONY: lint
 lint: golangci-lint ## Run golangci-lint linter & yamllint
@@ -154,8 +244,34 @@ docker-build: ## Build docker image with the manager.
 	$(CONTAINER_TOOL) build -t ${IMG} --build-arg VERSION=${VERSION} .
 
 .PHONY: docker-push
-docker-push: ## Push docker image with the manager.
+docker-push: docker-build ## Push the manager image, then run OpenShift Preflight against the remote image.
+	@echo "Remote registry required: pushing manager image $(IMG). Set IMAGE_REGISTRY=<registry>/<namespace> explicitly."
 	$(CONTAINER_TOOL) push ${IMG}
+	$(MAKE) --no-print-directory preflight-remote
+
+.PHONY: openshift-preflight
+openshift-preflight: docker-push ## Push the manager image, then run OpenShift Preflight against the remote image.
+
+.PHONY: preflight-remote
+preflight-remote: preflight
+	@echo "Remote registry required: running OpenShift Preflight against the pushed image $(IMG)."
+	@docker_config="$${PFLT_DOCKERCONFIG:-$$HOME/.docker/config.json}"; \
+	test -r "$$docker_config" || { echo "Error: Docker credentials are required for the private image; run docker login and set PFLT_DOCKERCONFIG if the config is not $$HOME/.docker/config.json."; exit 1; }; \
+	mkdir -p "$(PREFLIGHT_ARTIFACTS)"; \
+	PFLT_ARTIFACTS="$(PREFLIGHT_ARTIFACTS)" PFLT_LOGFILE="$(PREFLIGHT_LOGFILE)" PFLT_DOCKERCONFIG="$$docker_config" "$(PREFLIGHT)" check container "$(IMG)" | tee "$(PREFLIGHT_RESULT)"; \
+	grep -Fq '"passed": true' "$(PREFLIGHT_RESULT)" || { echo "Error: OpenShift Preflight reported a failed check."; exit 1; }
+
+.PHONY: release-approval-inputs
+release-approval-inputs:
+	@test -n "$(APPROVED_PKG_LIST)" && test -r "$(APPROVED_PKG_LIST)" || { echo "Error: set APPROVED_PKG_LIST to a readable internal approval list."; exit 1; }
+	@test -n "$(APPROVED_BASEOS_PKG_LIST)" && test -r "$(APPROVED_BASEOS_PKG_LIST)" || { echo "Error: set APPROVED_BASEOS_PKG_LIST to a readable internal approval list."; exit 1; }
+
+.PHONY: release-push
+release-push: release-approval-inputs pkg-check image-pkg-check ## Validate approved packages, push the manager, run Preflight, then push the bundle release image.
+	@echo "Remote registry required: pushing and validating manager image $(IMG), then pushing bundle image $(BUNDLE_IMG). Set IMAGE_REGISTRY=<registry>/<namespace> explicitly."
+	$(CONTAINER_TOOL) push ${IMG}
+	$(MAKE) --no-print-directory preflight-remote
+	$(CONTAINER_TOOL) push $(BUNDLE_IMG)
 
 # PLATFORMS defines the target platforms for the manager image be built to provide support to multiple
 # architectures. (i.e. make docker-buildx IMG=myregistry/mypoperator:0.0.1). To use this option you need to:
@@ -166,6 +282,7 @@ docker-push: ## Push docker image with the manager.
 PLATFORMS ?= linux/arm64,linux/amd64,linux/s390x,linux/ppc64le
 .PHONY: docker-buildx
 docker-buildx: ## Build and push docker image for the manager for cross-platform support
+	@echo "Remote registry required: docker buildx will push $(IMG). Set IMAGE_REGISTRY=<registry>/<namespace> explicitly."
 	# copy existing Dockerfile and insert --platform=${BUILDPLATFORM} into Dockerfile.cross, and preserve the original Dockerfile
 	sed -e '1 s/\(^FROM\)/FROM --platform=\$$\{BUILDPLATFORM\}/; t' -e ' 1,// s//FROM --platform=\$$\{BUILDPLATFORM\}/' Dockerfile > Dockerfile.cross
 	- $(CONTAINER_TOOL) buildx create --name project-v3-builder
@@ -206,49 +323,168 @@ $(LOCALBIN):
 
 ## Tool Binaries
 KUBECTL ?= kubectl
-KUSTOMIZE ?= $(GOBIN)/kustomize
-CONTROLLER_GEN ?= $(GOBIN)/controller-gen
-ENVTEST ?= $(GOBIN)/setup-envtest
+LOCAL_KUSTOMIZE := $(LOCALBIN)/kustomize
+LOCAL_CONTROLLER_GEN := $(LOCALBIN)/controller-gen
+LOCAL_OPERATOR_SDK := $(LOCALBIN)/operator-sdk-$(OPERATOR_SDK_VERSION)
+LOCAL_ENVTEST := $(LOCALBIN)/setup-envtest-$(ENVTEST_VERSION)
+LOCAL_PREFLIGHT := $(LOCALBIN)/preflight-$(OPENSHIFT_PREFLIGHT_VERSION)
+SYFT ?= syft
+# Approval data is intentionally supplied from a local or internal source.
+APPROVED_PKG_LIST ?=
+SBOM_ARTIFACTS_DIR ?= $(CURDIR)/sbom-artifacts
+PKG_SCAN_DIR ?= $(SBOM_ARTIFACTS_DIR)/pkg-scan
+PKG_SCAN_BINARY ?= $(PKG_SCAN_DIR)/manager
+PKG_SCAN_PURL_LIST ?= $(PKG_SCAN_DIR)/purls.txt
+PKG_SCAN_APPROVED_LIST ?= $(PKG_SCAN_DIR)/approved-purls.txt
+PKG_SCAN_UNAPPROVED_LIST ?= $(PKG_SCAN_DIR)/unapproved-purls.txt
+APPROVED_BASEOS_PKG_LIST ?=
+IMAGE_PKG_SCAN_DIR ?= $(SBOM_ARTIFACTS_DIR)/image-pkg-scan
+IMAGE_PKG_SCAN_ALL_PURL_LIST ?= $(IMAGE_PKG_SCAN_DIR)/all-purls.txt
+IMAGE_PKG_SCAN_PURL_LIST ?= $(IMAGE_PKG_SCAN_DIR)/purls.txt
+IMAGE_PKG_SCAN_APPROVED_LIST ?= $(IMAGE_PKG_SCAN_DIR)/approved-purls.txt
+IMAGE_PKG_SCAN_UNAPPROVED_LIST ?= $(IMAGE_PKG_SCAN_DIR)/unapproved-purls.txt
+BUNDLE_IMAGE_PKG_SCAN_DIR ?= $(SBOM_ARTIFACTS_DIR)/bundle-image-pkg-scan
+BUNDLE_IMAGE_PKG_SCAN_ALL_PURL_LIST ?= $(BUNDLE_IMAGE_PKG_SCAN_DIR)/all-purls.txt
+BUNDLE_IMAGE_PKG_SCAN_PURL_LIST ?= $(BUNDLE_IMAGE_PKG_SCAN_DIR)/purls.txt
+BUNDLE_IMAGE_PKG_SCAN_APPROVED_LIST ?= $(BUNDLE_IMAGE_PKG_SCAN_DIR)/approved-purls.txt
+BUNDLE_IMAGE_PKG_SCAN_UNAPPROVED_LIST ?= $(BUNDLE_IMAGE_PKG_SCAN_DIR)/unapproved-purls.txt
+PREFLIGHT_ARTIFACTS ?= $(CURDIR)/preflight-artifacts
+PREFLIGHT_LOGFILE ?= $(PREFLIGHT_ARTIFACTS)/preflight.log
+PREFLIGHT_RESULT ?= $(PREFLIGHT_ARTIFACTS)/result.json
 
-## Tool Versions
-KUSTOMIZE_VERSION ?= v5.2.1
-CONTROLLER_TOOLS_VERSION ?= v0.16.5
+ifeq ($(USE_SYSTEM_TOOLS),true)
+SYSTEM_KUSTOMIZE := $(shell command -v kustomize 2>/dev/null)
+SYSTEM_CONTROLLER_GEN := $(shell command -v controller-gen 2>/dev/null)
+SYSTEM_OPERATOR_SDK := $(shell command -v operator-sdk 2>/dev/null)
+SYSTEM_GOLANGCI_LINT := $(shell command -v golangci-lint 2>/dev/null)
+SYSTEM_ENVTEST := $(shell command -v setup-envtest 2>/dev/null)
+SYSTEM_PREFLIGHT := $(shell command -v preflight 2>/dev/null)
+
+SYSTEM_KUSTOMIZE_OK := $(shell if test -n "$(SYSTEM_KUSTOMIZE)"; then "$(SYSTEM_KUSTOMIZE)" version 2>&1 | grep -Fq "$(KUSTOMIZE_VERSION)" && echo true; fi)
+SYSTEM_CONTROLLER_GEN_OK := $(shell if test -n "$(SYSTEM_CONTROLLER_GEN)"; then "$(SYSTEM_CONTROLLER_GEN)" --version 2>&1 | grep -Fq "$(CONTROLLER_TOOLS_VERSION)" && echo true; fi)
+SYSTEM_OPERATOR_SDK_OK := $(shell if test -n "$(SYSTEM_OPERATOR_SDK)"; then "$(SYSTEM_OPERATOR_SDK)" version 2>&1 | grep -Fq "$(OPERATOR_SDK_VERSION)" && echo true; fi)
+SYSTEM_GOLANGCI_LINT_OK := $(shell if test -n "$(SYSTEM_GOLANGCI_LINT)"; then "$(SYSTEM_GOLANGCI_LINT)" version 2>&1 | grep -Fq "$(GOLANGCI_LINT_VERSION_NUMBER)" && echo true; fi)
+SYSTEM_ENVTEST_OK := $(shell if test -n "$(SYSTEM_ENVTEST)"; then "$(SYSTEM_ENVTEST)" version 2>&1 | grep -Fq "$(ENVTEST_VERSION)" && echo true; fi)
+SYSTEM_PREFLIGHT_OK := $(shell if test -n "$(SYSTEM_PREFLIGHT)"; then "$(SYSTEM_PREFLIGHT)" --version 2>&1 | grep -Fq "$(OPENSHIFT_PREFLIGHT_VERSION)" && echo true; fi)
+endif
+
+ifeq ($(SYSTEM_KUSTOMIZE_OK),true)
+KUSTOMIZE ?= $(SYSTEM_KUSTOMIZE)
+else
+KUSTOMIZE ?= $(LOCAL_KUSTOMIZE)
+endif
+
+ifeq ($(SYSTEM_CONTROLLER_GEN_OK),true)
+CONTROLLER_GEN ?= $(SYSTEM_CONTROLLER_GEN)
+else
+CONTROLLER_GEN ?= $(LOCAL_CONTROLLER_GEN)
+endif
+
+ifeq ($(SYSTEM_OPERATOR_SDK_OK),true)
+OPERATOR_SDK ?= $(SYSTEM_OPERATOR_SDK)
+else
+OPERATOR_SDK ?= $(LOCAL_OPERATOR_SDK)
+endif
+
+ifeq ($(SYSTEM_GOLANGCI_LINT_OK),true)
+GOLANGCI_LINT ?= $(SYSTEM_GOLANGCI_LINT)
+endif
+
+ifeq ($(SYSTEM_ENVTEST_OK),true)
+ENVTEST ?= $(SYSTEM_ENVTEST)
+else
+ENVTEST ?= $(LOCAL_ENVTEST)
+endif
+
+ifeq ($(SYSTEM_PREFLIGHT_OK),true)
+PREFLIGHT ?= $(SYSTEM_PREFLIGHT)
+else
+PREFLIGHT ?= $(LOCAL_PREFLIGHT)
+endif
 
 .PHONY: kustomize
-kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary. If wrong version is installed, it will be removed before downloading.
-$(KUSTOMIZE):
-	@if test -x $(GOBIN)/kustomize && ! $(GOBIN)/kustomize version | grep -q $(KUSTOMIZE_VERSION); then \
-		echo "$(GOBIN)/kustomize version is not expected $(KUSTOMIZE_VERSION). Removing it before installing."; \
-		rm -rf $(GOBIN)/kustomize; \
+ifeq ($(SYSTEM_KUSTOMIZE_OK),true)
+kustomize: ## Use the pinned kustomize version from PATH.
+	@echo "Using system kustomize $(KUSTOMIZE_VERSION): $(KUSTOMIZE)"
+else
+kustomize: $(LOCALBIN) ## Install the pinned kustomize version locally when no matching system tool exists.
+	@if ! test -x "$(LOCAL_KUSTOMIZE)" || ! "$(LOCAL_KUSTOMIZE)" version 2>&1 | grep -Fq "$(KUSTOMIZE_VERSION)"; then \
+		echo "Installing kustomize $(KUSTOMIZE_VERSION) in $(LOCALBIN)"; \
+		rm -f "$(LOCAL_KUSTOMIZE)"; \
+		GOBIN="$(LOCALBIN)" go install sigs.k8s.io/kustomize/kustomize/v5@$(KUSTOMIZE_VERSION); \
 	fi
-	test -s $(GOBIN)/kustomize || GOBIN=$(GOBIN) GO111MODULE=on go install sigs.k8s.io/kustomize/kustomize/v5@$(KUSTOMIZE_VERSION)
+endif
+
+.PHONY: golangci-lint
+ifeq ($(SYSTEM_GOLANGCI_LINT_OK),true)
+golangci-lint: ## Use the pinned golangci-lint version from PATH.
+	@echo "Using system golangci-lint $(GOLANGCI_LINT_VERSION): $(GOLANGCI_LINT)"
+else
+golangci-lint: ## Require the pinned golangci-lint version from PATH.
+	@echo "Error: golangci-lint $(GOLANGCI_LINT_VERSION) must be installed on PATH; automatic installation is disabled by licensing policy."; \
+	exit 1
+endif
 
 .PHONY: controller-gen
-controller-gen: $(CONTROLLER_GEN) ## Download controller-gen locally if necessary. If wrong version is installed, it will be overwritten.
-$(CONTROLLER_GEN):
-	test -s $(GOBIN)/controller-gen && $(GOBIN)/controller-gen --version | grep -q $(CONTROLLER_TOOLS_VERSION) || \
-	GOBIN=$(GOBIN) go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION)
+ifeq ($(SYSTEM_CONTROLLER_GEN_OK),true)
+controller-gen: ## Use the pinned controller-gen version from PATH.
+	@echo "Using system controller-gen $(CONTROLLER_TOOLS_VERSION): $(CONTROLLER_GEN)"
+else
+controller-gen: $(LOCALBIN) ## Install the pinned controller-gen version locally when no matching system tool exists.
+	@if ! test -x "$(LOCAL_CONTROLLER_GEN)" || ! "$(LOCAL_CONTROLLER_GEN)" --version 2>&1 | grep -Fq "$(CONTROLLER_TOOLS_VERSION)"; then \
+		echo "Installing controller-gen $(CONTROLLER_TOOLS_VERSION) in $(LOCALBIN)"; \
+		GOBIN="$(LOCALBIN)" go install sigs.k8s.io/controller-tools/cmd/controller-gen@$(CONTROLLER_TOOLS_VERSION); \
+	fi
+endif
 
 .PHONY: envtest
-envtest: $(ENVTEST) ## Download envtest-setup locally if necessary.
-$(ENVTEST):
-	test -s $(GOBIN)/setup-envtest || GOBIN=$(GOBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+ifeq ($(SYSTEM_ENVTEST_OK),true)
+envtest: ## Use the pinned setup-envtest version from PATH.
+	@echo "Using system setup-envtest $(ENVTEST_VERSION): $(ENVTEST)"
+else
+envtest: $(LOCAL_ENVTEST) ## Install the pinned setup-envtest version locally when no matching system tool exists.
+$(LOCAL_ENVTEST): $(LOCALBIN)
+	GOBIN=$(LOCALBIN) go install sigs.k8s.io/controller-runtime/tools/setup-envtest@$(ENVTEST_VERSION)
+	mv $(LOCALBIN)/setup-envtest $(LOCAL_ENVTEST)
+endif
+
+.PHONY: preflight
+ifeq ($(SYSTEM_PREFLIGHT_OK),true)
+preflight: ## Use the pinned OpenShift Preflight version from PATH.
+	@echo "Using system OpenShift Preflight $(OPENSHIFT_PREFLIGHT_VERSION): $(PREFLIGHT)"
+else
+preflight: $(LOCALBIN) ## Download the pinned OpenShift Preflight version locally when no matching system tool exists.
+	@if ! test -x "$(LOCAL_PREFLIGHT)" || ! "$(LOCAL_PREFLIGHT)" --version 2>&1 | grep -Fq "$(OPENSHIFT_PREFLIGHT_VERSION)"; then \
+		echo "Downloading OpenShift Preflight $(OPENSHIFT_PREFLIGHT_VERSION) to $(LOCALBIN)"; \
+		TMP="$(LOCAL_PREFLIGHT).tmp"; \
+		trap 'rm -f "$$TMP"' EXIT; \
+		wget --progress=dot:mega -O "$$TMP" "https://github.com/redhat-openshift-ecosystem/openshift-preflight/releases/download/$(OPENSHIFT_PREFLIGHT_VERSION)/preflight-linux-amd64"; \
+		chmod +x "$$TMP"; \
+		mv "$$TMP" "$(LOCAL_PREFLIGHT)"; \
+	fi
+endif
+
+# Utilize Kind or modify the e2e tests to load the image locally, enabling compatibility with other vendors.
+.PHONY: test-e2e  # Run the e2e tests against a Kind k8s instance that is spun up.
+test-e2e:
+	go test ./test/e2e/ -v -ginkgo.v
 
 .PHONY: operator-sdk
-OPERATOR_SDK ?= $(LOCALBIN)/operator-sdk
-operator-sdk: ## Download operator-sdk locally if necessary.
-ifeq (,$(wildcard $(OPERATOR_SDK)))
-ifeq (, $(shell which operator-sdk 2>/dev/null))
-	@{ \
-	set -e ;\
-	mkdir -p $(dir $(OPERATOR_SDK)) ;\
-	OS=$(shell go env GOOS) && ARCH=$(shell go env GOARCH) && \
-	curl -sSLo $(OPERATOR_SDK) https://github.com/operator-framework/operator-sdk/releases/download/$(OPERATOR_SDK_VERSION)/operator-sdk_$${OS}_$${ARCH} ;\
-	chmod +x $(OPERATOR_SDK) ;\
-	}
+ifeq ($(SYSTEM_OPERATOR_SDK_OK),true)
+operator-sdk: ## Use the pinned operator-sdk version from PATH.
+	@echo "Using system operator-sdk $(OPERATOR_SDK_VERSION): $(OPERATOR_SDK)"
 else
-OPERATOR_SDK = $(shell which operator-sdk)
-endif
+operator-sdk: $(LOCALBIN) ## Install the pinned operator-sdk version locally when no matching system tool exists.
+	@if ! test -x "$(LOCAL_OPERATOR_SDK)" || ! "$(LOCAL_OPERATOR_SDK)" version 2>&1 | grep -Fq "$(OPERATOR_SDK_VERSION)"; then \
+		echo "Installing operator-sdk $(OPERATOR_SDK_VERSION) in $(LOCALBIN)"; \
+		OS="$$(go env GOOS)"; \
+		ARCH="$$(go env GOARCH)"; \
+		TMP="$(LOCAL_OPERATOR_SDK).tmp"; \
+		trap 'rm -f "$$TMP"' EXIT; \
+		curl -fsSLo "$$TMP" "https://github.com/operator-framework/operator-sdk/releases/download/$(OPERATOR_SDK_VERSION)/operator-sdk_$${OS}_$${ARCH}"; \
+		chmod +x "$$TMP"; \
+		mv "$$TMP" "$(LOCAL_OPERATOR_SDK)"; \
+	fi
 endif
 
 .PHONY: bundle
@@ -265,24 +501,20 @@ bundle-build: bundle ## Build the bundle image.
 
 .PHONY: bundle-push
 bundle-push: ## Push the bundle image.
-	$(MAKE) docker-push IMG=$(BUNDLE_IMG)
+	@echo "Remote registry required: pushing bundle image $(BUNDLE_IMG). Set IMAGE_REGISTRY=<registry>/<namespace> explicitly."
+	$(CONTAINER_TOOL) push $(BUNDLE_IMG)
 
 .PHONY: opm
-OPM = $(LOCALBIN)/opm
-opm: ## Download opm locally if necessary.
-ifeq (,$(wildcard $(OPM)))
-ifeq (,$(shell which opm 2>/dev/null))
+OPM ?= $(LOCALBIN)/opm-$(OPM_VERSION)
+opm: $(OPM) ## Download the pinned opm version locally if necessary.
+$(OPM): $(LOCALBIN)
 	@{ \
 	set -e ;\
 	mkdir -p $(dir $(OPM)) ;\
 	OS=$(shell go env GOOS) && ARCH=$(shell go env GOARCH) && \
-	curl -sSLo $(OPM) https://github.com/operator-framework/operator-registry/releases/download/v1.23.0/$${OS}-$${ARCH}-opm ;\
+	curl -sSLo $(OPM) https://github.com/operator-framework/operator-registry/releases/download/$(OPM_VERSION)/$${OS}-$${ARCH}-opm ;\
 	chmod +x $(OPM) ;\
 	}
-else
-OPM = $(shell which opm)
-endif
-endif
 
 # A comma-separated list of bundle images (e.g. make catalog-build BUNDLE_IMGS=example.com/operator-bundle:v0.1.0,example.com/operator-bundle:v0.2.0).
 # These images MUST exist in a registry and be pull-able.
@@ -301,9 +533,11 @@ endif
 # https://github.com/operator-framework/community-operators/blob/7f1438c/docs/packaging-operator.md#updating-your-existing-operator
 .PHONY: catalog-build
 catalog-build: opm ## Build a catalog image.
+	@echo "Remote registry required: bundle image(s) must already be pushable and pullable: $(BUNDLE_IMGS)."
 	$(OPM) index add --container-tool docker --mode semver --tag $(CATALOG_IMG) --bundles $(BUNDLE_IMGS) $(FROM_INDEX_OPT)
 
 # Push the catalog image.
 .PHONY: catalog-push
 catalog-push: ## Push a catalog image.
-	$(MAKE) docker-push IMG=$(CATALOG_IMG)
+	@echo "Remote registry required: pushing catalog image $(CATALOG_IMG). Set IMAGE_REGISTRY=<registry>/<namespace> explicitly."
+	$(CONTAINER_TOOL) push $(CATALOG_IMG)

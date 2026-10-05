@@ -132,28 +132,30 @@ func setKMMModuleLoader(mod *kmmv1beta1.Module, aic *aicv1.AIC, loadedMods aicv1
 	// In order to load all 3 modules, moduleA shoud be defined in the ModuleName parameter of this struct
 	modulesLoadingOrder := make([]string, 0)
 	modulesLoadingOrder = append(modulesLoadingOrder, "qaic", "qrtr-mhi", "switchtec", "mhi")
-	mod.Spec.ModuleLoader.Container = kmmv1beta1.ModuleLoaderContainerSpec{
-		Modprobe: kmmv1beta1.ModprobeSpec{
-			ModuleName:          aicDriverModuleName,
-			FirmwarePath:        imageFirmwarePath,
-			ModulesLoadingOrder: modulesLoadingOrder,
-		},
-		KernelMappings: []kmmv1beta1.KernelMapping{
-			{
-				Regexp:         "^.+$",
-				ContainerImage: driversImage,
-				Build: &kmmv1beta1.Build{
-					DockerfileConfigMap: &v1.LocalObjectReference{
-						Name: getDockerfileCMName(aic, useInTree),
-					},
-					BuildArgs: []kmmv1beta1.BuildArg{
-						{
-							Name:  "QAIC_SRC_IMG",
-							Value: sourceImage,
+	mod.Spec.ModuleLoader = &kmmv1beta1.ModuleLoaderSpec{
+		Container: kmmv1beta1.ModuleLoaderContainerSpec{
+			Modprobe: kmmv1beta1.ModprobeSpec{
+				ModuleName:          aicDriverModuleName,
+				FirmwarePath:        imageFirmwarePath,
+				ModulesLoadingOrder: modulesLoadingOrder,
+			},
+			KernelMappings: []kmmv1beta1.KernelMapping{
+				{
+					Regexp:         "^.+$",
+					ContainerImage: driversImage,
+					Build: &kmmv1beta1.Build{
+						DockerfileConfigMap: &v1.LocalObjectReference{
+							Name: getDockerfileCMName(aic, useInTree),
 						},
-						{
-							Name:  "QAIC_VER",
-							Value: driversVersion,
+						BuildArgs: []kmmv1beta1.BuildArg{
+							{
+								Name:  "QAIC_SRC_IMG",
+								Value: sourceImage,
+							},
+							{
+								Name:  "QAIC_VER",
+								Value: driversVersion,
+							},
 						},
 					},
 				},

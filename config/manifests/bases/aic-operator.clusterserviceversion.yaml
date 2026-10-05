@@ -71,6 +71,4 @@ spec:
   relatedImages:
   - image: ghcr.io/qualcomm/cloud_ai_openshift_operator@sha256:d8690d8b78fcc5b1e7c96c7d16c7c30711bf28895532384a63cfa03798b297f2
     name: cloud_ai_openshift_operator-d8690d8b78fcc5b1e7c96c7d16c7c30711bf28895532384a63cfa03798b297f2
-  - image: registry.redhat.io/openshift4/ose-kube-rbac-proxy@sha256:b55f908e38695496011dbe334431cbdf5488c215f6850af3dffa528707c70a56
-    name: ose-kube-rbac-proxy-b55f908e38695496011dbe334431cbdf5488c215f6850af3dffa528707c70a56
   version: 0.0.0

@@ -1,0 +1,3 @@
+/sbom-artifacts/
+/preflight-artifacts/
+/bundle_tmp[0-9]*/

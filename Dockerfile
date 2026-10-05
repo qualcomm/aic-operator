@@ -1,5 +1,5 @@
 # Build the manager binary
-FROM registry.access.redhat.com/ubi9/go-toolset:1.23.9 AS builder
+FROM registry.access.redhat.com/ubi9/go-toolset:1.26.7 AS builder
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=none
@@ -50,7 +50,7 @@ COPY --chmod=755 operands/kmd_src_img_build/motd.sh /etc
 COPY operands/kmd_src_img_build/CONTAINER_LICENSE.txt /usr/share/doc
 RUN ln -s /usr/share/doc/CONTAINER_LICENSE.txt / && \
     ln -s /usr/share/doc/CONTAINER_LICENSE.txt /root && \
-    ln -s /usr/share/doc/CONTAINER_LICENSE.txt /licenses && \
+    cp /usr/share/doc/CONTAINER_LICENSE.txt /licenses && \
 # Different systems use different system wide non-login shell config files
     if [ -e /etc/bash.bashrc ]; then \
         echo '[ ! -z "$TERM" -a -r /etc/motd.sh ] && /etc/motd.sh' >> /etc/bash.bashrc ; \
