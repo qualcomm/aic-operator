@@ -7,6 +7,7 @@ package controller
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
@@ -51,8 +52,15 @@ var _ = BeforeSuite(func() {
 		// default path defined in controller-runtime which is /usr/local/kubebuilder/.
 		// Note that you must have the required binaries setup under the bin directory to perform
 		// the tests directly. When we run make test it will be setup and used automatically.
-		BinaryAssetsDirectory: filepath.Join("..", "..", "bin", "k8s",
-			fmt.Sprintf("1.28.3-%s-%s", runtime.GOOS, runtime.GOARCH)),
+	}
+	if assets := os.Getenv("KUBEBUILDER_ASSETS"); assets != "" {
+		testEnv.BinaryAssetsDirectory = assets
+	} else {
+		testEnv.BinaryAssetsDirectory = filepath.Join("..", "..", "bin", "k8s",
+			fmt.Sprintf("1.28.3-%s-%s", runtime.GOOS, runtime.GOARCH))
+	}
+	if _, err := os.Stat(filepath.Join(testEnv.BinaryAssetsDirectory, "etcd")); err != nil {
+		Skip("envtest assets are not installed; run make test to provision them")
 	}
 
 	var err error
@@ -74,6 +82,9 @@ var _ = BeforeSuite(func() {
 
 var _ = AfterSuite(func() {
 	By("tearing down the test environment")
+	if testEnv == nil || cfg == nil {
+		return
+	}
 	err := testEnv.Stop()
 	Expect(err).NotTo(HaveOccurred())
 })

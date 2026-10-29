@@ -80,10 +80,50 @@ const (
 
 // AICStatus defines the observed state of AIC
 type AICStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
 	// +kubebuilder:validation:Enum=Ignored;Ready;NotReady
 	State State `json:"state"`
+
+	// ObservedGeneration is the most recent generation evaluated by the controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Conditions describe the current readiness and prerequisite state.
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+
+	// Readiness summarizes selected nodes without exposing node metadata beyond names.
+	// +optional
+	Readiness AICReadinessSummary `json:"readiness,omitempty"`
+
+	// Nodes contains a bounded list of selected node observations.
+	// +optional
+	Nodes []AICNodeReadiness `json:"nodes,omitempty"`
+
+	// NextAction is a concise administrator-facing troubleshooting action.
+	// +optional
+	NextAction string `json:"nextAction,omitempty"`
+}
+
+type AICReadinessSummary struct {
+	Selected    int32 `json:"selected"`
+	Ready       int32 `json:"ready"`
+	Degraded    int32 `json:"degraded"`
+	Unavailable int32 `json:"unavailable"`
+}
+
+type AICNodeState string
+
+const (
+	AICNodeReady       AICNodeState = "Ready"
+	AICNodeDegraded    AICNodeState = "Degraded"
+	AICNodeUnavailable AICNodeState = "Unavailable"
+	AICNodeMismatched  AICNodeState = "Mismatched"
+)
+
+type AICNodeReadiness struct {
+	Name   string       `json:"name"`
+	State  AICNodeState `json:"state"`
+	Reason string       `json:"reason"`
 }
 
 //+kubebuilder:object:root=true

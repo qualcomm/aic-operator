@@ -26,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"time"
 
 	nfr "github.com/openshift/cluster-nfd-operator/api/v1alpha1"
@@ -34,11 +35,13 @@ import (
 	v1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	aicv1 "github.com/qualcomm/aic-operator/api/v1"
@@ -147,6 +150,9 @@ func (r *AICReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	if err != nil {
 		return res, fmt.Errorf("failed to handle SOC Reset DaemonSet creation %s: %v", req.NamespacedName, err)
 	}
+	if err = r.updateReadinessStatus(ctx, aic); err != nil {
+		return res, fmt.Errorf("failed to update AIC readiness status %s: %w", req.NamespacedName, err)
+	}
 
 	return ctrl.Result{}, nil
 }
@@ -157,7 +163,132 @@ func (r *AICReconciler) SetupWithManager(mgr ctrl.Manager, reconciliationInterva
 		For(&aicv1.AIC{}).
 		Owns(&kmmv1beta1.Module{}).
 		Owns(&appsv1.DaemonSet{}).
+		Owns(&v1.ConfigMap{}).
+		Owns(&nfr.NodeFeatureRule{}).
+		Watches(&v1.Node{}, handler.EnqueueRequestsFromMapFunc(r.mapNodeToAIC)).
+		Watches(&v1.Secret{}, handler.EnqueueRequestsFromMapFunc(r.mapSecretToAIC)).
 		Complete(r)
+}
+
+func (r *AICReconciler) updateReadinessStatus(ctx context.Context, aic *aicv1.AIC) error {
+	observation := readinessObservation{}
+	nodes := &v1.NodeList{}
+	if err := r.List(ctx, nodes); err != nil {
+		return fmt.Errorf("list nodes: %w", err)
+	}
+	observation.nodes = nodes.Items
+
+	module := &kmmv1beta1.Module{}
+	if err := r.Get(ctx, types.NamespacedName{Name: aic.Name, Namespace: aic.Namespace}, module); err == nil {
+		observation.module = module
+	} else if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("get KMM Module: %w", err)
+	}
+
+	nfrObj := &nfr.NodeFeatureRule{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "qcom-aic-nfr", Namespace: aic.Namespace}, nfrObj); err == nil {
+		observation.nfr = nfrObj
+	} else if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("get NodeFeatureRule: %w", err)
+	}
+
+	buildCM := &v1.ConfigMap{}
+	if err := r.Get(ctx, types.NamespacedName{Name: getDockerfileCMName(aic, false), Namespace: aic.Namespace}, buildCM); err == nil {
+		observation.buildCM = buildCM
+	} else if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("get build ConfigMap: %w", err)
+	}
+	if aic.Spec.UseInTreeModules {
+		inTreeCM := &v1.ConfigMap{}
+		if err := r.Get(ctx, types.NamespacedName{Name: getDockerfileCMName(aic, true), Namespace: aic.Namespace}, inTreeCM); err == nil {
+			observation.buildInTreeCM = inTreeCM
+		} else if !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("get in-tree build ConfigMap: %w", err)
+		}
+	}
+
+	if aic.Spec.ImageRepoSecret != nil {
+		secret := &v1.Secret{}
+		if err := r.Get(ctx, types.NamespacedName{Name: aic.Spec.ImageRepoSecret.Name, Namespace: aic.Namespace}, secret); err == nil {
+			observation.secret = secret
+		} else if !k8serrors.IsNotFound(err) {
+			return fmt.Errorf("get image pull Secret: %w", err)
+		}
+	}
+
+	deviceAgent := &appsv1.DaemonSet{}
+	if err := r.Get(ctx, types.NamespacedName{Name: aic.Name + "-qaic-device-agent-ds", Namespace: aic.Namespace}, deviceAgent); err == nil {
+		observation.deviceAgent = deviceAgent
+	} else if !k8serrors.IsNotFound(err) {
+		return fmt.Errorf("get device-agent DaemonSet: %w", err)
+	}
+
+	newStatus := evaluateReadiness(aic, observation)
+	newStatus = preserveConditionTransitionTimes(aic.Status, newStatus)
+	if reflect.DeepEqual(aic.Status, newStatus) {
+		return nil
+	}
+	oldStatus := aic.Status
+	copy := aic.DeepCopy()
+	aic.Status = newStatus
+	if err := r.Status().Patch(ctx, aic, client.MergeFrom(copy)); err != nil {
+		return err
+	}
+	if oldStatus.State != newStatus.State || oldStatus.Readiness != newStatus.Readiness {
+		log.FromContext(ctx).Info("AIC fleet readiness changed", "state", newStatus.State, "selected", newStatus.Readiness.Selected, "ready", newStatus.Readiness.Ready, "degraded", newStatus.Readiness.Degraded, "unavailable", newStatus.Readiness.Unavailable, "nextAction", newStatus.NextAction)
+	}
+	return nil
+}
+
+func preserveConditionTransitionTimes(oldStatus, newStatus aicv1.AICStatus) aicv1.AICStatus {
+	for i := range newStatus.Conditions {
+		for j := range oldStatus.Conditions {
+			if newStatus.Conditions[i].Type == oldStatus.Conditions[j].Type && newStatus.Conditions[i].Status == oldStatus.Conditions[j].Status && newStatus.Conditions[i].Reason == oldStatus.Conditions[j].Reason && newStatus.Conditions[i].Message == oldStatus.Conditions[j].Message {
+				newStatus.Conditions[i].LastTransitionTime = oldStatus.Conditions[j].LastTransitionTime
+				break
+			}
+		}
+		if newStatus.Conditions[i].LastTransitionTime.IsZero() {
+			newStatus.Conditions[i].LastTransitionTime = metav1.Now()
+		}
+	}
+	return newStatus
+}
+
+func (r *AICReconciler) mapNodeToAIC(ctx context.Context, obj client.Object) []ctrl.Request {
+	node, ok := obj.(*v1.Node)
+	if !ok {
+		return nil
+	}
+	list := &aicv1.AICList{}
+	if err := r.List(ctx, list); err != nil {
+		return nil
+	}
+	requests := make([]ctrl.Request, 0)
+	for _, aic := range list.Items {
+		if labels.SelectorFromSet(effectiveSelector(&aic)).Matches(labels.Set(node.Labels)) {
+			requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Name: aic.Name, Namespace: aic.Namespace}})
+		}
+	}
+	return requests
+}
+
+func (r *AICReconciler) mapSecretToAIC(ctx context.Context, obj client.Object) []ctrl.Request {
+	secret, ok := obj.(*v1.Secret)
+	if !ok {
+		return nil
+	}
+	list := &aicv1.AICList{}
+	if err := r.List(ctx, list, client.InNamespace(secret.Namespace)); err != nil {
+		return nil
+	}
+	requests := make([]ctrl.Request, 0)
+	for _, aic := range list.Items {
+		if aic.Spec.ImageRepoSecret != nil && aic.Spec.ImageRepoSecret.Name == secret.Name {
+			requests = append(requests, ctrl.Request{NamespacedName: types.NamespacedName{Name: aic.Name, Namespace: aic.Namespace}})
+		}
+	}
+	return requests
 }
 
 type AICReconcilerHelperAPI interface {

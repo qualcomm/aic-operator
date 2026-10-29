@@ -50,3 +50,46 @@ rules:
   - get
   - patch
   - update
+- apiGroups:
+  - nfd.openshift.io
+  resources:
+  - nodefeaturerules
+  verbs:
+  - create
+  - delete
+  - get
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core
+  resources:
+  - configmaps
+  verbs:
+  - create
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - core
+  resources:
+  - nodes
+  - secrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - daemonsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch

@@ -9,4 +9,12 @@ metadata:
     app.kubernetes.io/created-by: aic-operator
   name: aic-sample
 spec:
-  # TODO(user): Add fields here
+  sourceImage: ghcr.io/quic/cloud_ai_qaic_kmd_src
+  driversImage: registry.example.com/qaic/cloud_ai_qaic_kmd_ko:0.4.0_1.22.8.1_${KERNEL_VERSION}
+  driversVersion: 0.4.0_1.22.8.1
+  devicePluginImage: ghcr.io/quic/cloud_ai_k8s_device_plugin
+  devPluginVersion: 1.22.8.1
+  deviceAgentImage: ghcr.io/quic/cloud_ai_qaic_deviceagent
+  deviceAgentVersion: 0.4.0_1.22.8.1
+  imageRepoSecret:
+    name: qaic-registry
